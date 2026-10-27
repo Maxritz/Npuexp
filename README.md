@@ -1,48 +1,67 @@
-# Voodoo3/Wildcat NPU Virtualization - Experiments & Results
+Virtual NPU — batched/tensor compute NPU (CPU / Voodoo / Wildcat)
+==================================================================
 
-## Overview
-This project implements a virtual NPU based on Voodoo3/Wildcat architecture with:
-- Batched/tensor-style compute paths
-- Voodoo, Wildcat, Merged, Shader GEMM, Tensor Core kernels
-- Sherlock-style tracing instrumentation
-- Bitmap-based memory management
-- BeOS-style scheduler (teams/threads, priority-based preemptive scheduling, areas)
-- 2-NPU cluster support
+This is a self-contained virtual NPU used for accelerator-style benchmarking.
+It is *not* hardware and not the PCem video-core NPU. It models three compute
+styles against the same math so you can compare dispatch/culling cost and
+correctness:
 
-## Directory Structure
-- `npu/` - Core NPU implementation
-  - `virtual_npu.h/c` - Main NPU API and implementation
-  - Various test programs
-- `pcem/` - PCem emulator with Voodoo/NPU integration
-- PDFs with hardware specs
+- CPU direct: reference tiled matmul kernel.
+- Voodoo: batched command-stream style — one batch dispatch, per-tile base
+  reuse, explicit tile walk with triangle clamping at tile edges.
+- Wildcat: programmable compute unit style, with an optional hierarchical-Z-style
+  tile culling filter that can skip whole tiles when their control value is low.
 
-## Test Results
+The NPU exposes:
+- a flat memory space for A, B, C, and optional cull control
+- a command queue with `virtual_npu_compute()` + `virtual_npu_process()`
+- status/accumulators: ops, processed, culled, dispatches, batches
 
-### Single NPU vs CPU (512x512x512, optimized with -O3 -march=native)
-| Kernel | Time (ms) | GFLOPS | Speedup vs CPU |
-|--------|-----------|--------|----------------|
-| CPU Baseline | ~63ms | ~4.24 GFLOPS | 1.00x |
-| MERGED (Fused Tiled) | ~17.75ms | ~15.12 GFLOPS | 3.57x |
-| TENSOR_CORE (16x16x16) | ~69.65ms | ~3.85 GFLOPS | 0.91x |
-| SHADER_GEMM | slower | lower | < 1x |
-| VOODOO | slower | lower | < 1x |
+The Unit 1 compute instruction set is currently mapped to:
+- 0x01 ADD
+- 0x02 MUL
+- 0x03 XOR
+- 0x04 BLEND0
+- 0x05 BLEND1
+- 0x06 BLEND2
+- 0x07 BLEND3
+- bit 8 accumulation toggle
 
-### 2-NPU Cluster vs CPU
-| Configuration | Size | Time (ms) | GFLOPS | Speedup vs CPU |
-|---------------|------|-----------|--------|----------------|
-| CPU Baseline | 512³ | ~61.9ms | ~4.34 GFLOPS | 1.00x |
-| 2-NPU Cluster (parallel split) | 512³ | ~14.3ms | ~18.77 GFLOPS | 4.33x |
+The compute loop is batched by count and operates on packed 32-bit words.
 
-### Key Optimizations
-1. Fused tiled GEMM with aggressive blocking (128x128x128 tiles)
-2. Loop unrolling (8-way unrolling in inner loops)
-3. Compiler optimizations (-O3 -march=native -funroll-loops)
-4. Better memory access patterns (B matrix accessed optimally)
-5. Parallel cluster execution across 2 NPU instances
+Build
+-----
+```
+cd npu
+g++ -std=c++17 -O2 -Wall -Wextra -o test_matmul_batched test_matmul_batched.c virtual_npu.c
+```
 
-## Features Implemented
-- **Instruction Set**: CPU (0), Voodoo (1), Wildcat (2), Merged (3), Shader GEMM (4), Shader Matmul (5), Fused GEMM (6), Tensor Core (7)
-- **Memory Management**: Bitmap-based page tracking (4KB pages), BeOS-style areas with allocation/deallocation
-- **Scheduler**: BeOS-style preemptive scheduler with teams/threads, priority-based selection (1-100), quantum allocation
-- **Tracing**: Sherlock-IT style instrumentation for performance analysis
+Run matmul comparison
+---------------------
+```
+cd npu
+./test_matmul_batched
+```
 
+It runs C = A * B for a few M×K×N shapes, compares NPU Voodoo vs CPU and NPU
+Wildcat vs CPU, and prints time, TFLOPS, dispatches/batches/ops/processed/culled.
+
+What the numbers mean
+---------------------
+Because this NPU still runs in ordinary C on the same CPU, the "NPU" paths are
+software models of different compute styles, not a separate physical device. The
+comparison is therefore meaningful for:
+- correctness of the batched/tensor-style kernels
+- dispatch/culling behavior and overhead
+- tile math and edge clamping
+
+For a more realistic accelerator comparison, the next step is to give the NPU
+real batched/tensor math primitives (for example dot-product/FMA-style ops and a
+sensible memory layout), rather than per-element matmul inside each tile.
+
+Current status
+--------------
+- Matmul correctness checked against a CPU reference for the shapes in
+  `test_matmul_batched.c`.
+- The batched/tensor interfaces now take explicit (M, K, N) tile parameters so
+  tile math is no longer derived incorrectly from a flattened count.
